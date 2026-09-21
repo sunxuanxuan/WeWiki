@@ -1,0 +1,324 @@
+// WeWiki Prisma schema
+// PostgreSQL connection is configured in prisma.config.ts via DATABASE_URL.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum GlobalRole {
+  USER        @map("user")
+  ADMIN       @map("admin")
+  SUPER_ADMIN @map("super_admin")
+}
+
+enum UserStatus {
+  ACTIVE   @map("active")
+  DISABLED @map("disabled")
+}
+
+enum SpaceVisibility {
+  PRIVATE @map("private")
+  SHARED  @map("shared")
+}
+
+enum SpaceRole {
+  OWNER  @map("owner")
+  ADMIN  @map("admin")
+  EDITOR @map("editor")
+  VIEWER @map("viewer")
+}
+
+enum NoteStatus {
+  DRAFT     @map("draft")
+  PUBLISHED @map("published")
+  ARCHIVED  @map("archived")
+}
+
+enum NoteVisibility {
+  PRIVATE @map("private")
+  SPACE   @map("space")
+  SHARED  @map("shared")
+}
+
+enum NoteRole {
+  OWNER  @map("owner")
+  ADMIN  @map("admin")
+  EDITOR @map("editor")
+  VIEWER @map("viewer")
+}
+
+enum FileKind {
+  IMAGE    @map("image")
+  DOCUMENT @map("document")
+  PDF      @map("pdf")
+  MINDMAP  @map("mindmap")
+  ARCHIVE  @map("archive")
+  OTHER    @map("other")
+}
+
+enum PreviewType {
+  HTML @map("html")
+  PDF  @map("pdf")
+  TEXT @map("text")
+}
+
+enum PreviewStatus {
+  PENDING    @map("pending")
+  PROCESSING @map("processing")
+  READY      @map("ready")
+  FAILED     @map("failed")
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  name         String?
+  passwordHash String?    @map("password_hash")
+  avatarUrl    String?    @map("avatar_url")
+  globalRole   GlobalRole @default(USER) @map("global_role")
+  status       UserStatus @default(ACTIVE)
+  lastLoginAt  DateTime?  @map("last_login_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  sessions        Session[]
+  ownedSpaces     Space[]          @relation("SpaceOwner")
+  ownedNotes      Note[]           @relation("NoteOwner")
+  spaceMembers    SpaceMember[]
+  notePermissions NotePermission[]
+  attachments     Attachment[]
+  noteRevisions   NoteRevision[]
+  auditLogs       AuditLog[]       @relation("AuditActor")
+  apiTokens       ApiToken[]
+
+  @@map("users")
+}
+
+model ApiToken {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  name        String
+  tokenHash   String    @unique @map("token_hash")
+  tokenPrefix String    @map("token_prefix")
+  scopes      String[]  @default([])
+  expiresAt   DateTime? @map("expires_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  revokedAt   DateTime? @map("revoked_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenPrefix])
+  @@map("api_tokens")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  sessionToken String   @unique @map("session_token")
+  expiresAt    DateTime @map("expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Space {
+  id          String          @id @default(cuid())
+  name        String
+  description String?
+  ownerId     String          @map("owner_id")
+  visibility  SpaceVisibility @default(PRIVATE)
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+  deletedAt   DateTime?       @map("deleted_at")
+
+  owner       User          @relation("SpaceOwner", fields: [ownerId], references: [id])
+  members     SpaceMember[]
+  notes       Note[]
+  attachments Attachment[]
+  tags        Tag[]
+
+  @@index([ownerId])
+  @@map("spaces")
+}
+
+model SpaceMember {
+  id        String    @id @default(cuid())
+  spaceId   String    @map("space_id")
+  userId    String    @map("user_id")
+  role      SpaceRole @default(VIEWER)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([spaceId, userId])
+  @@index([userId])
+  @@map("space_members")
+}
+
+model Note {
+  id            String         @id @default(cuid())
+  spaceId       String         @map("space_id")
+  ownerId       String         @map("owner_id")
+  parentId      String?        @map("parent_id")
+  title         String
+  slug          String?
+  content       String         @default("")
+  contentFormat String         @default("markdown") @map("content_format")
+  status        NoteStatus     @default(DRAFT)
+  visibility    NoteVisibility @default(SPACE)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  deletedAt     DateTime?      @map("deleted_at")
+
+  space       Space            @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  owner       User             @relation("NoteOwner", fields: [ownerId], references: [id])
+  parent      Note?            @relation("NoteTree", fields: [parentId], references: [id])
+  children    Note[]           @relation("NoteTree")
+  permissions NotePermission[]
+  attachments Attachment[]
+  tags        NoteTag[]
+  revisions   NoteRevision[]
+
+  @@unique([spaceId, slug])
+  @@index([spaceId])
+  @@index([ownerId])
+  @@index([parentId])
+  @@index([updatedAt])
+  @@map("notes")
+}
+
+model NotePermission {
+  id        String   @id @default(cuid())
+  noteId    String   @map("note_id")
+  userId    String   @map("user_id")
+  role      NoteRole @default(VIEWER)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([noteId, userId])
+  @@index([userId])
+  @@map("note_permissions")
+}
+
+model Attachment {
+  id           String    @id @default(cuid())
+  noteId       String?   @map("note_id")
+  spaceId      String?   @map("space_id")
+  uploaderId   String    @map("uploader_id")
+  originalName String    @map("original_name")
+  storageKey   String    @unique @map("storage_key")
+  mimeType     String    @map("mime_type")
+  fileExt      String?   @map("file_ext")
+  fileSize     Int       @map("file_size")
+  fileKind     FileKind  @default(OTHER) @map("file_kind")
+  checksum     String?
+  metadata     Json?
+  createdAt    DateTime  @default(now()) @map("created_at")
+  deletedAt    DateTime? @map("deleted_at")
+
+  note     Note?             @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  space    Space?            @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  uploader User              @relation(fields: [uploaderId], references: [id])
+  previews DocumentPreview[]
+
+  @@index([noteId])
+  @@index([spaceId])
+  @@index([uploaderId])
+  @@map("attachments")
+}
+
+model DocumentPreview {
+  id           String        @id @default(cuid())
+  attachmentId String        @map("attachment_id")
+  previewType  PreviewType   @map("preview_type")
+  status       PreviewStatus @default(PENDING)
+  storageKey   String?       @map("storage_key")
+  errorMessage String?       @map("error_message")
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  attachment Attachment @relation(fields: [attachmentId], references: [id], onDelete: Cascade)
+
+  @@index([attachmentId])
+  @@map("document_previews")
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  spaceId   String   @map("space_id")
+  name      String
+  color     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  space Space     @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  notes NoteTag[]
+
+  @@unique([spaceId, name])
+  @@index([spaceId])
+  @@map("tags")
+}
+
+model NoteTag {
+  noteId String @map("note_id")
+  tagId  String @map("tag_id")
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@map("note_tags")
+}
+
+model NoteRevision {
+  id            String   @id @default(cuid())
+  noteId        String   @map("note_id")
+  editorId      String   @map("editor_id")
+  title         String
+  content       String
+  changeSummary String?  @map("change_summary")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  note   Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  editor User @relation(fields: [editorId], references: [id])
+
+  @@index([noteId])
+  @@index([editorId])
+  @@map("note_revisions")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  action     String
+  targetType String   @map("target_type")
+  targetId   String?  @map("target_id")
+  ip         String?
+  userAgent  String?  @map("user_agent")
+  metadata   Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}

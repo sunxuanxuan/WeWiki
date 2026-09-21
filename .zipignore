@@ -1,0 +1,53 @@
+# dependency / build output
+node_modules
+node_modules/*
+.next
+.next/*
+out
+out/*
+build
+build/*
+coverage
+coverage/*
+dist
+dist/*
+migration-data
+migration-data/*
+
+# vcs / editor / system
+.git
+.git/*
+.claude
+.claude/*
+.codex
+.codex/*
+.agents
+.agents/*
+.vscode
+.vscode/*
+.idea
+.idea/*
+.DS_Store
+__MACOSX
+__MACOSX/*
+
+# local runtime files
+uploads
+uploads/*
+.pnpm-store
+.pnpm-store/*
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.tsbuildinfo
+
+# deploy / local env
+.vercel
+.vercel/*
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
