@@ -36,7 +36,39 @@ function decodeHtmlEntities(value: string) {
     .replace(/&amp;/gi, "&");
 }
 
-function normalizeTableCell(value: string) {
+function getHtmlAttribute(attributes: string, name: string) {
+  const match = attributes.match(new RegExp(`\\b${name}=["']([^"']*)["']`, "i"));
+  return match?.[1] ? decodeHtmlEntities(match[1]).trim() : "";
+}
+
+function escapeMarkdownLinkLabel(value: string) {
+  return value.replaceAll("\\", "\\\\").replaceAll("[", "\\[").replaceAll("]", "\\]");
+}
+
+function convertCitesToMarkdown(content: string) {
+  const documentRouteByFileType: Record<string, string> = {
+    doc: "docs",
+    docx: "docx",
+    mindnote: "mindnotes",
+    sheets: "sheets",
+    wiki: "wiki",
+  };
+
+  return content.replace(/<cite\b([^>]*)>(?:<\/cite>)?/gi, (_match, attributes: string) => {
+    const title = getHtmlAttribute(attributes, "title") || getHtmlAttribute(attributes, "user-name");
+    const docId = getHtmlAttribute(attributes, "doc-id");
+    const fileType = getHtmlAttribute(attributes, "file-type").toLowerCase();
+    const route = documentRouteByFileType[fileType];
+    const label = title || docId;
+
+    if (!label) return "";
+    if (!route || !/^[a-zA-Z0-9_-]+$/.test(docId)) return label;
+
+    return `[${escapeMarkdownLinkLabel(label)}](https://bytedance.larkoffice.com/${route}/${docId})`;
+  });
+}
+
+function convertCalloutInlineHtml(value: string) {
   return decodeHtmlEntities(
     value
       .replace(/<latex\b[^>]*>([\s\S]*?)<\/latex>/gi, (_match, formula: string) => `$${formula.trim()}$`)
@@ -44,7 +76,59 @@ function normalizeTableCell(value: string) {
         const label = text.replace(/<[^>]+>/g, "").trim() || href;
         return `[${label}](${href})`;
       })
+      .replace(/<\/?(?:b|strong)(?:\s+[^>]*)?>/gi, "**")
+      .replace(/<\/?(?:i|em)(?:\s+[^>]*)?>/gi, "*")
+      .replace(/<\/?del(?:\s+[^>]*)?>/gi, "~~")
+      .replace(/<code\b[^>]*>([\s\S]*?)<\/code>/gi, (_match, code: string) => `\`${code.replaceAll("`", "\\`")}\``)
+      .replace(lineBreakTagPattern, "\n")
+      .replace(/<[^>]+>/g, ""),
+  );
+}
+
+function convertCalloutsToMarkdown(content: string) {
+  return content.replace(/<callout\b([^>]*)>([\s\S]*?)<\/callout>/gi, (_match, attributes: string, body: string) => {
+    const emojiMatch = attributes.match(/\bemoji=["']([^"']+)["']/i);
+    const emoji = emojiMatch?.[1]?.trim();
+    const markdown = convertCalloutInlineHtml(
+      body
+        .replace(/<p\b[^>]*>/gi, "")
+        .replace(/<\/p>/gi, "\n\n")
+        .replace(/<ul\b[^>]*>|<\/ul>/gi, "\n")
+        .replace(/<ol\b[^>]*>|<\/ol>/gi, "\n")
+        .replace(/<li\b[^>]*>/gi, "\n- ")
+        .replace(/<\/li>/gi, "\n"),
+    )
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line, index, lines) => line || (index > 0 && index < lines.length - 1))
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+
+    if (!markdown) return "\n";
+
+    const lines = markdown.split("\n");
+    if (emoji) {
+      const firstContentLine = lines.findIndex((line) => line.trim());
+      if (firstContentLine >= 0) lines[firstContentLine] = `${emoji} ${lines[firstContentLine]}`;
+    }
+
+    return `\n\n${lines.map((line) => (line ? `> ${line}` : ">")).join("\n")}\n\n`;
+  });
+}
+
+function normalizeTableCell(value: string) {
+  return decodeHtmlEntities(
+    convertCitesToMarkdown(value)
+      .replace(/<latex\b[^>]*>([\s\S]*?)<\/latex>/gi, (_match, formula: string) => `$${formula.trim()}$`)
+      .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi, (_match, href: string, text: string) => {
+        const label = text.replace(/<[^>]+>/g, "").trim() || href;
+        return `[${label}](${href})`;
+      })
       .replace(/<\/p>\s*<p[^>]*>/gi, `${tableLineBreakPlaceholder}${tableLineBreakPlaceholder}`)
+      .replace(/<\/?(?:ul|ol)\b[^>]*>/gi, "")
+      .replace(/<li\b[^>]*>/gi, "• ")
+      .replace(/<\/li>/gi, tableLineBreakPlaceholder)
       .replace(lineBreakTagPattern, tableLineBreakPlaceholder)
       .replace(/<[^>]+>/g, "")
       .replace(/\|/g, "\\|")
@@ -122,7 +206,7 @@ function normalizeAdjacentStrongDelimiters(content: string) {
 }
 
 export function prepareMarkdownForRender(content: string) {
-  const normalized = convertHtmlTablesToMarkdown(content)
+  const normalized = convertCitesToMarkdown(convertCalloutsToMarkdown(convertHtmlTablesToMarkdown(content.replace(/\r\n?/g, "\n"))))
     .replace(htmlCommentPattern, "\n")
     .replace(customBlockTagPattern, "\n\n")
     .replace(inlineStyleTagPattern, "")

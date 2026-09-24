@@ -9,7 +9,8 @@ import { z } from "zod";
 import { NoteVisibility, SpaceRole } from "@/generated/prisma/enums";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/db";
-import { parseBatchImportArchives, parseImportedDocument, rewriteMarkdownAssetUrls } from "@/lib/imported-document";
+import { MAX_BATCH_SINGLE_DOCUMENT_EXTRACTED_SIZE, MAX_BATCH_SINGLE_DOCUMENT_FILE_SIZE } from "@/lib/import-limits";
+import { parseImportedDocument, rewriteMarkdownAssetUrls } from "@/lib/imported-document";
 import { allowedMimeTypes, detectFileKind, uploadDir } from "@/lib/storage";
 
 const createItemSchema = z.object({
@@ -17,16 +18,16 @@ const createItemSchema = z.object({
   title: z.string().trim().max(120).optional(),
   spaceId: z.string().trim().min(1).optional(),
   parentId: z.string().trim().min(1).optional(),
-  documentSource: z.enum(["blank", "upload"]).optional(),
-});
-
-const batchImportSchema = z.object({
-  spaceId: z.string().trim().min(1).optional(),
-  parentId: z.string().trim().min(1).optional(),
+  documentSource: z.enum(["blank", "upload", "batch-upload"]).optional(),
 });
 
 const deleteDirectorySchema = z.object({
   directoryId: z.string().trim().min(1),
+});
+
+const renameDirectorySchema = z.object({
+  directoryId: z.string().trim().min(1),
+  title: z.string().trim().min(1).max(120),
 });
 
 const deleteDocumentSchema = z.object({
@@ -391,12 +392,20 @@ export async function createWikiItem(formData: FormData) {
   let importedFileName: string | undefined;
   let importedAssets: Awaited<ReturnType<typeof parseImportedDocument>>["assets"] = [];
 
-  if (documentSource === "upload") {
+  if (documentSource === "upload" || documentSource === "batch-upload") {
     if (!uploadedFile) {
       throw new Error("请选择要导入的 .md 或 .zip 文件。");
     }
 
-    const imported = await parseImportedDocument(uploadedFile);
+    const imported = await parseImportedDocument(
+      uploadedFile,
+      documentSource === "batch-upload"
+        ? {
+            maximumFileSize: MAX_BATCH_SINGLE_DOCUMENT_FILE_SIZE,
+            maximumExtractedSize: MAX_BATCH_SINGLE_DOCUMENT_EXTRACTED_SIZE,
+          }
+        : undefined,
+    );
     documentTitle = documentTitle || imported.title;
     documentContent = imported.content;
     importedSource = imported.source;
@@ -525,54 +534,6 @@ export async function createWikiItem(formData: FormData) {
   revalidatePath("/notes");
   revalidatePath(`/notes/${note.id}`);
   return { id: note.id };
-}
-
-export async function batchImportWikiDocuments(formData: FormData) {
-  const userId = await getCurrentUserId();
-  const parsed = batchImportSchema.safeParse({
-    spaceId: formData.get("spaceId") || undefined,
-    parentId: formData.get("parentId") || undefined,
-  });
-
-  if (!parsed.success) {
-    throw new Error("请选择有效的导入位置。");
-  }
-
-  const rawFile = formData.get("batchFile");
-  if (!(rawFile instanceof File) || rawFile.size <= 0) {
-    throw new Error("请选择要批量导入的 ZIP 文件。");
-  }
-
-  const target = await resolveTarget(userId, parsed.data.spaceId, parsed.data.parentId);
-  const archives = await parseBatchImportArchives(rawFile);
-  const failedArchives: string[] = [];
-  let createdCount = 0;
-
-  for (const archive of archives) {
-    const documentFormData = new FormData();
-    documentFormData.set("type", "document");
-    documentFormData.set("documentSource", "upload");
-    documentFormData.set("spaceId", target.spaceId);
-    if (target.parentId) {
-      documentFormData.set("parentId", target.parentId);
-    }
-    documentFormData.set("sourceFile", archive.file);
-
-    try {
-      await createWikiItem(documentFormData);
-      createdCount += 1;
-    } catch {
-      failedArchives.push(archive.archiveName);
-    }
-  }
-
-  revalidatePath("/notes");
-  return {
-    totalCount: archives.length,
-    createdCount,
-    failedCount: failedArchives.length,
-    failedArchives,
-  };
 }
 
 export async function deleteDirectory(formData: FormData) {
@@ -758,6 +719,42 @@ export async function purgeExpiredTrashNotes(userId?: string) {
   }
 }
 
+export async function renameDirectory(formData: FormData) {
+  const userId = await getCurrentUserId();
+  const parsed = renameDirectorySchema.safeParse({
+    directoryId: formData.get("directoryId"),
+    title: formData.get("title"),
+  });
+
+  if (!parsed.success) {
+    throw new Error("请输入有效的目录名称。");
+  }
+
+  const directory = await requireWritableDirectory(userId, parsed.data.directoryId);
+  if (directory.title === parsed.data.title) {
+    return { id: directory.id, title: directory.title, renamed: false };
+  }
+
+  await prisma.$transaction([
+    prisma.note.update({
+      where: { id: directory.id },
+      data: { title: parsed.data.title },
+    }),
+    prisma.auditLog.create({
+      data: {
+        actorId: userId,
+        action: "directory.renamed",
+        targetType: "note",
+        targetId: directory.id,
+        metadata: { previousTitle: directory.title, title: parsed.data.title },
+      },
+    }),
+  ]);
+
+  revalidatePath("/notes");
+  return { id: directory.id, title: parsed.data.title, renamed: true };
+}
+
 export async function moveDirectory(formData: FormData) {
   const userId = await getCurrentUserId();
   const parsed = moveDirectorySchema.safeParse({
@@ -811,7 +808,7 @@ export async function moveDirectory(formData: FormData) {
   }
 
   if (directory.parentId === nextParentId && directory.spaceId === nextSpaceId) {
-    return;
+    return { moved: false, affectedItemCount: 0 };
   }
 
   const subtreeIds = await collectDescendantNoteIds(directory.id);
@@ -823,6 +820,10 @@ export async function moveDirectory(formData: FormData) {
     }),
     prisma.note.updateMany({
       where: { id: { in: subtreeIds.filter((id) => id !== directory.id) } },
+      data: { spaceId: nextSpaceId },
+    }),
+    prisma.attachment.updateMany({
+      where: { noteId: { in: subtreeIds } },
       data: { spaceId: nextSpaceId },
     }),
     prisma.auditLog.create({
@@ -842,6 +843,7 @@ export async function moveDirectory(formData: FormData) {
   ]);
 
   revalidatePath("/notes");
+  return { moved: true, affectedItemCount: subtreeIds.length };
 }
 
 export async function moveWikiDocument(formData: FormData) {

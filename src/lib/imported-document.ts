@@ -1,14 +1,16 @@
 import JSZip, { type JSZipObject } from "jszip";
 import path from "node:path";
 import sharp from "sharp";
+import {
+  MAX_BATCH_DOCUMENT_EXTRACTED_SIZE,
+  MAX_BATCH_IMPORT_FILE_SIZE,
+  MAX_BATCH_NESTED_ARCHIVE_SIZE,
+  MAX_SINGLE_IMPORT_EXTRACTED_SIZE,
+  MAX_SINGLE_IMPORT_FILE_SIZE,
+} from "@/lib/import-limits";
 
-const MAX_IMPORT_FILE_SIZE = 25 * 1024 * 1024;
 const MAX_ARCHIVE_FILE_COUNT = 500;
-const MAX_EXTRACTED_SIZE = 100 * 1024 * 1024;
-const MAX_BATCH_IMPORT_FILE_SIZE = 18 * 1024 * 1024;
 const MAX_BATCH_DOCUMENT_COUNT = 50;
-const MAX_BATCH_NESTED_ARCHIVE_SIZE = 100 * 1024 * 1024;
-const MAX_BATCH_DOCUMENT_EXTRACTED_SIZE = 200 * 1024 * 1024;
 const IMAGE_TRIM_AREA_THRESHOLD = 0.88;
 const IMAGE_TRIM_PADDING = 24;
 
@@ -152,7 +154,7 @@ function getAssetRelativePath(fileName: string, markdownFileName: string) {
 async function extractZipEntry(
   entry: JSZipObject,
   extractedSize: { value: number },
-  maximumExtractedSize = MAX_EXTRACTED_SIZE,
+  maximumExtractedSize = MAX_SINGLE_IMPORT_EXTRACTED_SIZE,
 ) {
   const buffer = await entry.async("nodebuffer");
   extractedSize.value += buffer.byteLength;
@@ -193,7 +195,10 @@ async function trimExcessWhiteImageMargin(buffer: Buffer, mimeType: string) {
   }
 }
 
-async function parseZipPayload(buffer: Buffer): Promise<ParsedZipPayload> {
+async function parseZipPayload(
+  buffer: Buffer,
+  maximumExtractedSize = MAX_SINGLE_IMPORT_EXTRACTED_SIZE,
+): Promise<ParsedZipPayload> {
   let archive: JSZip;
 
   try {
@@ -220,8 +225,8 @@ async function parseZipPayload(buffer: Buffer): Promise<ParsedZipPayload> {
     (total, entry) => total + ((entry as JSZipObjectWithSizes)._data?.uncompressedSize ?? 0),
     0,
   );
-  if (declaredExtractedSize > MAX_EXTRACTED_SIZE) {
-    throw new Error("压缩包解压后的文件总大小不能超过 100 MB。");
+  if (declaredExtractedSize > maximumExtractedSize) {
+    throw new Error(`压缩包解压后的文件总大小不能超过 ${maximumExtractedSize / 1024 / 1024} MB。`);
   }
 
   const markdownEntries = entries.filter((entry) => getExtension(entry.name) === ".md");
@@ -231,7 +236,7 @@ async function parseZipPayload(buffer: Buffer): Promise<ParsedZipPayload> {
 
   const markdownEntry = markdownEntries[0];
   const extractedSize = { value: 0 };
-  const markdownBuffer = await extractZipEntry(markdownEntry, extractedSize);
+  const markdownBuffer = await extractZipEntry(markdownEntry, extractedSize, maximumExtractedSize);
   const assets: ImportedAsset[] = [];
 
   for (const entry of entries) {
@@ -242,7 +247,7 @@ async function parseZipPayload(buffer: Buffer): Promise<ParsedZipPayload> {
 
     const fileName = path.posix.basename(relativePath);
     const mimeType = getMimeType(fileName);
-    const sourceBuffer = await extractZipEntry(entry, extractedSize);
+    const sourceBuffer = await extractZipEntry(entry, extractedSize, maximumExtractedSize);
     const fileBuffer = await trimExcessWhiteImageMargin(sourceBuffer, mimeType);
 
     assets.push({
@@ -263,13 +268,19 @@ async function parseZipPayload(buffer: Buffer): Promise<ParsedZipPayload> {
   };
 }
 
-export async function parseImportedDocument(file: File) {
+export async function parseImportedDocument(
+  file: File,
+  limits: { maximumFileSize?: number; maximumExtractedSize?: number } = {},
+) {
   if (!(file instanceof File) || file.size <= 0) {
     throw new Error("请先选择要上传的文件。");
   }
 
-  if (file.size > MAX_IMPORT_FILE_SIZE) {
-    throw new Error("上传文件大小不能超过 25 MB。");
+  const maximumFileSize = limits.maximumFileSize ?? MAX_SINGLE_IMPORT_FILE_SIZE;
+  const maximumExtractedSize = limits.maximumExtractedSize ?? MAX_SINGLE_IMPORT_EXTRACTED_SIZE;
+
+  if (file.size > maximumFileSize) {
+    throw new Error(`上传文件大小不能超过 ${maximumFileSize / 1024 / 1024} MB。`);
   }
 
   const extension = getExtension(file.name);
@@ -289,7 +300,7 @@ export async function parseImportedDocument(file: File) {
     throw new Error("目前仅支持上传 .md 或 .zip 文件。");
   }
 
-  const payload = await parseZipPayload(Buffer.from(await file.arrayBuffer()));
+  const payload = await parseZipPayload(Buffer.from(await file.arrayBuffer()), maximumExtractedSize);
 
   return {
     title: payload.title || file.name.replace(/\.zip$/i, "") || "未命名文档",
@@ -306,7 +317,7 @@ export async function parseBatchImportArchives(file: File): Promise<BatchImportA
   }
 
   if (file.size > MAX_BATCH_IMPORT_FILE_SIZE) {
-    throw new Error("批量导入 ZIP 大小不能超过 18 MB。");
+    throw new Error("批量导入 ZIP 大小不能超过 500 MB。");
   }
 
   if (getExtension(file.name) !== ".zip") {
@@ -340,7 +351,7 @@ export async function parseBatchImportArchives(file: File): Promise<BatchImportA
     0,
   );
   if (declaredNestedArchiveSize > MAX_BATCH_NESTED_ARCHIVE_SIZE) {
-    throw new Error("批量导入 ZIP 中的文档压缩包总大小不能超过 100 MB。");
+    throw new Error("批量导入 ZIP 中的文档压缩包总大小不能超过 500 MB。");
   }
 
   const extractedSize = { value: 0 };
@@ -364,7 +375,7 @@ export async function parseBatchImportArchives(file: File): Promise<BatchImportA
     }
 
     if (declaredDocumentExtractedSize > MAX_BATCH_DOCUMENT_EXTRACTED_SIZE) {
-      throw new Error("批量导入文档解压后的总大小不能超过 200 MB。");
+      throw new Error("批量导入文档解压后的总大小不能超过 500 MB。");
     }
 
     const bytes = new Uint8Array(buffer.byteLength);
